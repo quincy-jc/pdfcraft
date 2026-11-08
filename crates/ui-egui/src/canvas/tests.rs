@@ -1341,6 +1341,11 @@ fn a_thumbnail_still_shown_keeps_the_others_while_a_visible_page_renders() {
     v.frame_visible.insert(0);
     assert_eq!(v.prepare_render_queue(&info, 1.0), vec![main]);
     assert!(v.thumbs.contains_key(&0) && v.thumbs.contains_key(&3), "both wait for the page");
+    v.begin_render_frame();
+    v.frame_queue = vec![main];
+    v.frame_visible.insert(0);
+    assert_eq!(v.prepare_render_queue(&info, 1.0), vec![main]);
+    assert!(v.thumbs.is_empty(), "the last one no longer shown, both go");
 }
 
 #[test]
