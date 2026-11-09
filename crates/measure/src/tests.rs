@@ -497,7 +497,7 @@ fn repeated_content_pays_for_every_filter_stage() {
         .obj("<< /Type /Page /Parent 2 0 R /Contents [4 0 R 4 0 R 4 0 R 4 0 R 4 0 R 4 0 R 4 0 R 4 0 R] >>")
         .stream("/Filter [/ASCIIHexDecode /RunLengthDecode]", &hex);
     let d = Document::open(Arc::new(pdf.build())).unwrap();
-    let g = snap::geometry_with_limits(&d, 0, snap::Limits::WITHIN_A_FRAME).unwrap();
+    let g = snap::geometry_with_limits(&d, 0, SMALL).unwrap();
     assert!(g.truncated, "eight draws decode past the page's bound");
 }
 
