@@ -256,12 +256,21 @@ fn degenerate_and_dense_paths_keep_snap_targets_bounded() {
     let g = snap::geometry_with_limits(&d, 0, SMALL).unwrap();
     assert!(g.truncated);
     let targets = g.endpoints().count() + g.midpoints().count();
-    assert!(targets <= 40_000 + 12, "{targets}");
-    assert!(g.segment_count() <= 20_000 + 4);
+    assert!(targets <= 40_000, "{targets}");
+    assert!(g.segment_count() <= 20_000);
     // Unpainted curves and lines are capped too.
     let d = fixture(&"0 0 m 5 9 1 9 7 0 c 0 3 l ".repeat(30_000), "", &[]);
     let g = snap::geometry_with_limits(&d, 0, SMALL).unwrap();
     assert!(g.truncated && g.endpoints().next().is_none());
+}
+/// A path's edges, the closing one a fill adds included, count against what the page already
+/// holds: the cap is the page's, not each path's.
+#[test]
+fn closing_edges_stay_within_the_page_target_cap() {
+    let d = fixture("0 0 m 1 0 l S 2 0 m 3 0 l f", "", &[]);
+    let g = snap::geometry_with_limits(&d, 0, snap::Limits { targets: 7, ..SMALL }).unwrap();
+    let targets = g.endpoints().count() + g.midpoints().count();
+    assert!(targets <= 7 && g.truncated, "{targets} targets, truncated: {}", g.truncated);
 }
 #[test]
 fn deep_graphics_state_and_unreadable_streams_are_skipped_not_fatal() {

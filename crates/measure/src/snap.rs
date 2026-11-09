@@ -150,14 +150,11 @@ impl Geometry {
         if tolerance.is_nan() || tolerance < 0.0 {
             return false;
         }
-        let (segs, _) = self.grid.near(self, at, tolerance);
-        segs.iter()
-            .filter_map(|&i| self.segs.get(i as usize))
-            .map(seg)
-            .filter(|[a, b]| distance(at, nearest(at, *a, *b)) <= tolerance)
-            .take(257)
-            .count()
-            > 256
+        // Segments only, and no further than the 257th found: a hover on a heavy sheet gathers
+        // no list of everything near it.
+        let close = |i: u32| self.segs.get(i as usize).map(seg).is_some_and(|[a, b]| distance(at, nearest(at, a, b)) <= tolerance);
+        let mut found = HashSet::new();
+        self.grid.segments_near(self, at, tolerance).filter(|&i| close(i)).any(|i| found.insert(i) && found.len() > 256)
     }
     pub fn snap(&self, at: Point, tolerance: f64, options: SnapOptions) -> Result<Option<Snap>> {
         check_points(&[at])?;
@@ -279,6 +276,14 @@ struct Walker<'a> {
     limits: Limits,
 }
 impl Walker<'_> {
+    /// What a path may add: the page's limits, less what the page already holds.
+    fn path_limits(&self) -> Limits {
+        Limits {
+            segments: self.limits.segments.saturating_sub(self.geometry.segs.len()),
+            targets: self.limits.targets.saturating_sub(self.geometry.targets()),
+            ..self.limits
+        }
+    }
     fn walk(&mut self, object: &Object, resources: &Dict, initial: Matrix, depth: usize) -> Result<()> {
         if depth >= 32 || self.streams >= 4096 || self.geometry.truncated {
             self.geometry.truncated = true;
@@ -335,7 +340,7 @@ impl Walker<'_> {
         let mut start = None;
         let mut current = None;
         let mut closures = Vec::new();
-        let mut path = Geometry::with_limits(self.limits);
+        let mut path = Geometry::with_limits(self.path_limits());
         // Read on the first `Do` and kept: resolving a direct dictionary copies it.
         let mut xobjects = None;
         let point = |m: Matrix, x: f64, y: f64| {
@@ -459,13 +464,14 @@ impl Walker<'_> {
                     self.geometry.segs.append(&mut path.segs);
                     self.geometry.tgts.append(&mut path.tgts);
                     self.geometry.truncated |= path.truncated;
+                    path = Geometry::with_limits(self.path_limits());
                     closures.clear();
                     current = None;
                     start = None;
                 }
                 "n" => {
                     self.geometry.truncated |= path.truncated;
-                    path = Geometry::with_limits(self.limits);
+                    path = Geometry::with_limits(self.path_limits());
                     closures.clear();
                     current = None;
                     start = None;
@@ -709,26 +715,45 @@ impl Grid {
         (self.col(x0), self.row(y0), self.col(x1), self.row(y1))
     }
 
-    /// The segments and targets near `at` (all within `tolerance` of it, and maybe more), each
-    /// list in drawing order without repeats.
-    fn near(&self, g: &Geometry, at: Point, tolerance: f64) -> (Vec<u32>, Vec<u32>) {
-        let all = || ((0..g.segs.len() as u32).collect(), (0..g.tgts.len() as u32).collect());
+    /// The cells (first and last column, first and last row) within `tolerance` of `at`, and
+    /// whether the box lies entirely outside the grid (so only wide segments can be near); `None`
+    /// when every item must be looked at (no grid, or too wide or unbounded a box).
+    fn cells_near(&self, at: Point, tolerance: f64) -> Option<((usize, usize, usize, usize), bool)> {
         if self.cols == 0 || self.rows == 0 {
-            return if g.segs.is_empty() && g.tgts.is_empty() { (Vec::new(), Vec::new()) } else { all() };
+            return None;
         }
         // Rounding to `f32` can stop the box short of a candidate's cell: this much wider can't.
         let t = (tolerance + (at[0].abs().max(at[1].abs()) + tolerance) * 2.0 * f64::from(f32::EPSILON)) as f32;
         let (x, y) = (at[0] as f32, at[1] as f32);
         if !(x.is_finite() && y.is_finite() && t.is_finite()) {
-            return all();
+            return None;
         }
         let (c0, r0, c1, r1) = self.range(x - t, y - t, x + t, y + t);
-        // Entirely outside the grid: nothing is near (except wide segments).
         let outside =
             x + t < self.x0 || y + t < self.y0 || x - t > self.x0 + self.cell * self.cols as f32 || y - t > self.y0 + self.cell * self.rows as f32;
-        if (c1 - c0 + 1) * (r1 - r0 + 1) > MAX_QUERY_CELLS {
-            return all();
-        }
+        ((c1 - c0 + 1) * (r1 - r0 + 1) <= MAX_QUERY_CELLS).then_some(((c0, r0, c1, r1), outside))
+    }
+
+    /// The segments that may lie within `tolerance` of `at`, one at a time (some more than once),
+    /// so a caller can stop early.
+    fn segments_near<'a>(&'a self, g: &'a Geometry, at: Point, tolerance: f64) -> Box<dyn Iterator<Item = u32> + 'a> {
+        let Some(((c0, r0, c1, r1), outside)) = self.cells_near(at, tolerance) else {
+            return Box::new(0..g.segs.len() as u32);
+        };
+        let cells = (!outside).then(|| (r0..=r1).flat_map(move |r| (c0..=c1).map(move |c| r * self.cols + c))).into_iter().flatten();
+        let in_cell = move |k: usize| {
+            let range = self.seg_start.get(k).zip(self.seg_start.get(k + 1)).map(|(&s, &e)| s as usize..e as usize);
+            range.and_then(|r| self.seg_items.get(r)).unwrap_or(&[]).iter().copied()
+        };
+        Box::new(self.wide.iter().copied().chain(cells.flat_map(in_cell)))
+    }
+
+    /// The segments and targets near `at` (all within `tolerance` of it, and maybe more), each
+    /// list in drawing order without repeats.
+    fn near(&self, g: &Geometry, at: Point, tolerance: f64) -> (Vec<u32>, Vec<u32>) {
+        let Some(((c0, r0, c1, r1), outside)) = self.cells_near(at, tolerance) else {
+            return ((0..g.segs.len() as u32).collect(), (0..g.tgts.len() as u32).collect());
+        };
         let mut segs: Vec<u32> = self.wide.clone();
         let mut tgts: Vec<u32> = Vec::new();
         if !outside {
